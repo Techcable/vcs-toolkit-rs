@@ -422,6 +422,12 @@ impl Repo<JobRunner> {
     /// discover-vs-open split in gitoxide (`gix::discover` vs `gix::open`) and
     /// libgit2 (`git_repository_discover` vs `git_repository_open`) — see
     /// issue #8.
+    ///
+    /// If `dir` itself is a **bare** git repository (`git init --bare`), this
+    /// errors with [`Error::BareRepository`] rather than the generic
+    /// `NotARepository` — checking `dir` for the bare markers needs no
+    /// ancestor walk, so it fits `open`'s single-directory contract just as
+    /// well as the `.jj`/`.git` checks above (issue #6).
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         // Absolutise so the bound `cwd`/`root` are consistent with `discover`'s
         // and so a relative "." names the actual directory, not an empty path.
@@ -430,6 +436,8 @@ impl Repo<JobRunner> {
             BackendKind::Jj
         } else if is_git_marker(&dir.join(".git")) {
             BackendKind::Git
+        } else if is_bare_git_repo_marker(&dir) {
+            return Err(Error::BareRepository(dir));
         } else {
             return Err(Error::NotARepository(dir));
         };
@@ -1193,12 +1201,12 @@ mod tests {
     // --- bare git repository (issue #6) -------------------------------------
 
     // The issue #6 repro: a `git init --bare` directory (no `.git` subdir, just
-    // `HEAD`/`config`/`objects`/`refs` in the root) must open as
-    // `Error::BareRepository`, not the generic `Error::NotARepository` — matched
-    // by variant, not by message substring, so the distinction can't silently
-    // regress into the old generic error.
+    // `HEAD`/`config`/`objects`/`refs` in the root) must be reported as
+    // `Error::BareRepository` by both `discover` and `open`, not the generic
+    // `Error::NotARepository` — matched by variant, not by message substring,
+    // so the distinction can't silently regress into the old generic error.
     #[test]
-    fn discover_reports_bare_repository_not_generic_not_a_repository() {
+    fn discover_and_open_report_bare_repository_not_generic_not_a_repository() {
         let tmp = TempDir::new("bare-repo");
         let root = tmp.path();
         std::fs::write(root.join("HEAD"), "ref: refs/heads/main\n").unwrap();
@@ -1211,13 +1219,12 @@ mod tests {
             other => panic!("expected Error::BareRepository, got {other:?}"),
         }
 
-        // The strict, non-walking `open` doesn't special-case bare repos — a
-        // bare repo has no `.git`/`.jj` marker in itself, so it's just
-        // `NotARepository` there (only `discover`'s walk-then-classify path
-        // distinguishes it).
+        // The strict, non-walking `open` also special-cases a bare repo sitting
+        // at exactly `dir` — that check needs no ancestor walk, so it fits
+        // `open`'s single-directory contract.
         match Repo::open(root) {
-            Err(Error::NotARepository(p)) => assert_eq!(p, root),
-            other => panic!("expected Error::NotARepository, got {other:?}"),
+            Err(Error::BareRepository(p)) => assert_eq!(p, root),
+            other => panic!("expected Error::BareRepository, got {other:?}"),
         }
     }
 
